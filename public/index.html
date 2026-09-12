@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>岩芯切片批次工作台</title>
+<style>
+  :root {
+    --bg:#eef1ea; --panel:#fff; --ink:#232820; --muted:#6a7262; --line:#d6dccf;
+    --accent:#4f6f40; --accent-d:#3d5731; --danger:#b03a2e; --warnbg:#fdf3e2; --warnline:#e0b15e;
+    --done:#3d7a52; --chip:#eef3e8;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:"PingFang SC","Microsoft YaHei",Arial,sans-serif; font-size:14px; }
+  header { padding:18px 26px; background:#fff; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
+  h1 { margin:0; font-size:22px; }
+  h2 { margin:0 0 10px; font-size:16px; }
+  h3 { margin:0; font-size:15px; }
+  .sub { color:var(--muted); font-size:12px; margin-top:3px; }
+  main { display:grid; grid-template-columns:360px 1fr; gap:18px; padding:18px 26px; align-items:start; }
+  .panel,.card,form.regist { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:15px; }
+  form.regist { position:sticky; top:14px; max-height:calc(100vh - 28px); overflow:auto; }
+  label { display:block; margin:9px 0 4px; color:var(--muted); font-size:12px; }
+  input,select,textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:8px 9px; font:inherit; background:#fff; color:var(--ink); }
+  textarea { min-height:56px; resize:vertical; }
+  button { border:0; border-radius:6px; background:var(--accent); color:#fff; padding:8px 12px; font-weight:600; cursor:pointer; font-size:13px; }
+  button:hover { background:var(--accent-d); }
+  button.ghost { background:#eef0ea; color:var(--ink); border:1px solid var(--line); }
+  button.small { padding:5px 9px; font-size:12px; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .owner-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px 8px; }
+  .stats { display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:14px; }
+  .stat { background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .stat strong { display:block; font-size:24px; margin-top:2px; }
+  .stat span { color:var(--muted); font-size:12px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(430px,1fr)); gap:14px; }
+  .card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+  .pill { display:inline-block; border-radius:999px; padding:2px 10px; font-size:12px; border:1px solid var(--line); background:#f5f6f2; white-space:nowrap; }
+  .pill.live { background:var(--chip); color:var(--accent-d); border-color:#c4d4b8; }
+  .pill.done { background:#e7f2ea; color:var(--done); border-color:#b9d8c2; }
+  .meta { color:var(--muted); font-size:12px; line-height:1.7; }
+  .bar { height:8px; border-radius:99px; background:#e7ebe2; overflow:hidden; margin:8px 0 4px; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+  .overdue-box { margin:10px 0; border:1px solid var(--warnline); background:var(--warnbg); border-radius:8px; padding:8px 10px; color:#8a5a12; font-size:12px; }
+  .next-box { margin:10px 0; border:1px dashed #b9c4ae; background:#f7faf3; border-radius:8px; padding:8px 10px; font-size:12px; }
+  .next-box b { color:var(--accent-d); }
+  details.slices { margin-top:10px; border-top:1px solid var(--line); padding-top:8px; }
+  summary { cursor:pointer; font-size:13px; font-weight:600; }
+  .slice { border:1px solid var(--line); border-radius:8px; padding:9px 10px; margin-top:8px; background:#fcfdfb; }
+  .slice.over { border-color:var(--warnline); background:#fffdf7; }
+  .slice-head { display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap; }
+  .stages { display:flex; gap:3px; margin:7px 0; flex-wrap:wrap; }
+  .stages span { font-size:11px; padding:2px 7px; border-radius:4px; background:#ecefe8; color:var(--muted); }
+  .stages span.cur { background:var(--accent); color:#fff; font-weight:700; }
+  .stages span.fin { background:#d9e8d2; color:var(--done); }
+  .obs { white-space:pre-wrap; background:#f4f7f1; border-radius:6px; padding:7px 9px; font-size:12px; margin:6px 0; }
+  .records { font-size:11px; color:var(--muted); margin:6px 0 0; padding-left:0; list-style:none; }
+  .records li { padding:2px 0; border-bottom:1px dotted var(--line); }
+  .delivered-banner { background:#e7f2ea; border:1px solid #b9d8c2; color:var(--done); border-radius:8px; padding:8px 10px; font-size:12px; margin-top:8px; }
+  .inline-form { display:grid; gap:6px; margin-top:8px; }
+  .tag-owner { color:var(--accent-d); font-weight:600; }
+  #toast { position:fixed; left:50%; bottom:26px; transform:translateX(-50%); max-width:640px; padding:11px 18px; border-radius:8px; background:#333a2f; color:#fff; font-size:13px; box-shadow:0 6px 22px rgba(0,0,0,.22); opacity:0; pointer-events:none; transition:opacity .18s; z-index:99; white-space:pre-wrap; }
+  #toast.show { opacity:1; }
+  #toast.err { background:var(--danger); }
+  #toast.ok { background:var(--done); }
+  .slice-add-row { display:flex; gap:6px; margin-top:6px; }
+  .slice-add-row input { flex:1; }
+  .muted { color:var(--muted); }
+  .hr { border:0; border-top:1px solid var(--line); margin:12px 0 4px; }
+  @media (max-width:980px){ main{grid-template-columns:1fr;} form.regist{position:static;max-height:none;} .stats{grid-template-columns:repeat(2,1fr);} }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>岩芯切片批次工作台</h1>
+    <div class="sub">取样 → 切割 → 研磨 → 染色 → 观察 → 交付 · 每步记录操作人 / 时间 / 依据</div>
+  </div>
+  <button id="reload" class="ghost">刷新工作台</button>
+</header>
+
+<main>
+  <!-- 样本登记 -->
+  <form class="regist" id="registerForm">
+    <h2>样本登记 / 批次建档</h2>
+    <div class="row">
+      <div><label>项目名称 *</label><input name="project" required placeholder="东岭铜矿外围普查"></div>
+      <div><label>登记人 *</label><input name="registeredBy" required placeholder="陆川"></div>
+    </div>
+    <div class="row">
+      <div><label>钻孔编号 *</label><input name="borehole" required placeholder="ZK-17"></div>
+      <div><label>岩芯箱号 *</label><input name="coreBox" required placeholder="BX-09"></div>
+    </div>
+    <div class="row">
+      <div><label>取样深度 *</label><input name="depth" required placeholder="128.40-128.80m"></div>
+      <div><label>岩性描述</label><input name="rockType" placeholder="花岗闪长岩"></div>
+    </div>
+
+    <hr class="hr">
+    <label>各工序默认负责人（留空则由登记人承担）</label>
+    <div class="owner-grid">
+      <div><label>取样</label><input name="owner_取样" placeholder="陆川"></div>
+      <div><label>切割</label><input name="owner_切割" placeholder="高岩"></div>
+      <div><label>研磨</label><input name="owner_研磨" placeholder="韩砂"></div>
+      <div><label>染色</label><input name="owner_染色" placeholder="苏染"></div>
+      <div><label>观察</label><input name="owner_观察" placeholder="顾鉴"></div>
+    </div>
+
+    <hr class="hr">
+    <label>一次建立多张切片（数量，0 = 仅建档）</label>
+    <input name="sliceCount" type="number" min="0" max="50" value="3">
+    <button type="submit" style="margin-top:12px;width:100%">登记批次并建立切片</button>
+  </form>
+
+  <!-- 工作台 -->
+  <section>
+    <div class="stats" id="stats"></div>
+    <div class="cards" id="cards"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const STAGES = ["取样","切割","研磨","染色","观察"];
+let model = { batches: [], stageHours: {} };
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+function esc(v) {
+  if (v === null || v === undefined) return "";
+  return String(v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  const p = n => String(n).padStart(2,"0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+let toastTimer = null;
+function toast(msg, kind = "err") {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = `show ${kind}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.className = ""; }, kind === "ok" ? 1800 : 4200);
+}
+
+async function api(path, options = {}) {
+  const opts = { ...options };
+  if (opts.body) {
+    opts.headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+    opts.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch { /* ignore */ }
+  if (!res.ok) {
+    const msg = data?.message || `请求失败（HTTP ${res.status}）`;
+    const err = new Error(msg);
+    err.code = data?.error;
+    err.data = data;
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+/* ---------- 渲染 ---------- */
+
+function renderStats() {
+  const bs = model.batches;
+  const totalSlices = bs.reduce((n, b) => n + b.progress.total, 0);
+  const observed = bs.reduce((n, b) => n + b.progress.observed, 0);
+  const overdue = bs.reduce((n, b) => n + b.overdueCount, 0);
+  const pending = bs.filter(b => !b.delivered).length;
+  const delivered = bs.length - pending;
+  const items = [
+    ["在制批次", pending],
+    ["已交付批次", delivered],
+    ["切片总数", totalSlices],
+    ["观察完成", `${observed}/${totalSlices}`],
+    ["逾期停留", overdue],
+  ];
+  $("#stats").innerHTML = items.map(([k, v]) =>
+    `<div class="stat"><span>${k}</span><strong>${v}</strong></div>`).join("");
+}
+
+function renderStages(slice) {
+  return STAGES.map((st, i) => {
+    const cur = slice.stage === st;
+    const fin = slice.stage && STAGES.indexOf(slice.stage) > i;
+    return `<span class="${cur ? "cur" : fin ? "fin" : ""}">${st}</span>`;
+  }).join("");
+}
+
+function renderSlice(batch, s) {
+  const overCls = s.overdue ? "over" : "";
+  const overdueLine = s.overdue
+    ? `<div class="overdue-box">⚠ 逾期：在“${esc(s.overdue.stage)}”已停留超出 ${s.overdue.limitHours} 小时时限，超期约 ${s.overdue.overHours} 小时（自 ${fmtTime(s.stageEnterAt)} 起）</div>`
+    : "";
+  const ownerLine = s.nextStage
+    ? `下一步：<b>${esc(s.nextStage)}</b> · 负责人 <span class="tag-owner">${esc(s.nextOwner || batch.registeredBy)}</span>`
+    : (s.delivered ? "已随批次交付封存" : "五道工序已完成，待批次交付");
+
+  let action = "";
+  if (!batch.delivered && !s.delivered && s.nextStage) {
+    const needObs = s.nextStage === "观察";
+    action = `
+      <div class="inline-form">
+        <div class="row">
+          <div><label>操作人 *</label><input data-f="operator" placeholder="${esc(s.nextOwner || batch.registeredBy)}"></div>
+          <div><label>操作时间</label><input data-f="at" type="datetime-local"></div>
+        </div>
+        <div><label>依据（作业指导书 / 标准 / 任务单）*</label><input data-f="basis" placeholder="如：制片作业指导书 v3.2 / 任务单 ZK17-09"></div>
+        ${needObs ? `<div><label>观察结果 *（为空不能完成观察，也不能交付）</label><textarea data-f="observation" placeholder="矿物组成、结构构造、矿化特征……"></textarea></div>` : ""}
+        <div><button class="small" data-act="advance" data-batch="${esc(batch.id)}" data-slice="${esc(s.code)}">推进到「${esc(s.nextStage)}」</button></div>
+      </div>`;
+  }
+  let obsEdit = "";
+  if (!batch.delivered && !s.delivered && s.stage === "观察") {
+    obsEdit = `
+      <details><summary class="muted" style="font-size:12px">补录 / 修订观察结果</summary>
+        <div class="inline-form">
+          <textarea data-f="observation2">${esc(s.observation || "")}</textarea>
+          <div><label>操作人 *</label><input data-f="operator2" placeholder="观察人"></div>
+          <button class="small ghost" data-act="obs" data-batch="${esc(batch.id)}" data-slice="${esc(s.code)}">保存观察结果</button>
+        </div>
+      </details>`;
+  }
+  const records = s.records.map(r =>
+    `<li>· ${fmtTime(r.at)} 【${esc(r.stage)}】${esc(r.operator)}｜依据：${esc(r.basis)}${r.observation ? "｜已记录观察结果" : ""}</li>`
+  ).join("");
+
+  return `
+    <div class="slice ${overCls}">
+      <div class="slice-head">
+        <b>${esc(s.code)}</b>
+        <span class="pill ${s.delivered ? "done" : "live"}">${s.stage ? esc(s.stage) : "待取样"}${s.delivered ? " · 已交付" : ""}</span>
+      </div>
+      <div class="stages">${renderStages(s)}</div>
+      <div class="meta">${esc(s.method || "未指定制片方法")} · 进入当前工序：${fmtTime(s.stageEnterAt)}</div>
+      ${overdueLine}
+      <div class="next-box">${ownerLine}</div>
+      ${s.observation ? `<div class="obs">🔬 ${esc(s.observation)}</div>` : (s.stage === "观察" ? `<div class="obs" style="color:#b03a2e;background:#fdeeec">观察结果为空：不可交付</div>` : "")}
+      ${obsEdit}
+      ${action}
+      ${records ? `<ul class="records">${records}</ul>` : ""}
+    </div>`;
+}
+
+function renderBatch(b) {
+  const pillCls = b.delivered ? "done" : "live";
+  const overdueHtml = b.overdueItems.length
+    ? `<div class="overdue-box">⚠ 本批次 ${b.overdueCount} 项逾期：${b.overdueItems.map(o =>
+        `${esc(o.code)} 卡在「${esc(o.stage)}」超期约 ${o.overHours}h`).join("；")}</div>`
+    : "";
+  const nextHtml = b.delivered ? "" : (b.nextGroups.length
+    ? `<div class="next-box">下一步负责人：${b.nextGroups.map(g =>
+        `<b>${esc(g.stage)}</b> → <span class="tag-owner">${esc(g.owner)}</span>（${g.slices.length} 张）`).join("　；　")}</div>`
+    : `<div class="next-box">全部切片已完成观察，等待 <span class="tag-owner">${esc(b.owners["观察"] || b.registeredBy)}</span> / 授权人交付</div>`);
+
+  const addForm = b.delivered ? "" : `
+    <div class="slice-add-row">
+      <input data-add-count type="number" min="1" max="50" value="2" style="max-width:90px" title="数量">
+      <input data-add-method placeholder="制片/染色方法（可选，多张共用）">
+      <button class="small ghost" data-act="add" data-batch="${esc(b.id)}">批量添加切片</button>
+    </div>`;
+
+  const deliver = b.delivered
+    ? `<div class="delivered-box">✔ 已交付 ${fmtTime(b.deliveredAt)}｜交付人：${esc(b.deliveryRecord?.operator)}｜依据：${esc(b.deliveryRecord?.basis)}<br>记录已封存，重复交付不会改写原记录。</div>`
+    : `<div style="margin-top:10px">
+        ${b.canDeliver ? "" : `<div class="meta" style="margin-bottom:6px">交付条件：全部切片完成观察且观察结果非空</div>`}
+        <div class="inline-form" style="grid-template-columns:1fr 1fr auto;display:grid">
+          <input data-del-operator placeholder="交付人 *">
+          <input data-del-basis placeholder="交付依据（报告编号/任务单）*">
+          <button data-act="deliver" data-batch="${esc(b.id)}" ${b.canDeliver ? "" : "disabled"}>批次交付</button>
+        </div>
+      </div>`;
+
+  return `
+    <article class="card">
+      <div class="card-head">
+        <div>
+          <h3>${esc(b.project)}</h3>
+          <div class="meta">${esc(b.id)} · ${esc(b.borehole)} · ${esc(b.coreBox)} · ${esc(b.depth)}${b.rockType ? " · " + esc(b.rockType) : ""}</div>
+          <div class="meta">登记人 ${esc(b.registeredBy)} · ${fmtTime(b.registeredAt)}</div>
+        </div>
+        <span class="pill ${pillCls}">${b.delivered ? "已交付" : esc(b.status)}</span>
+      </div>
+      <div class="bar"><i style="width:${b.progress.percent}%"></i></div>
+      <div class="meta">进度：${b.progress.observed}/${b.progress.total} 张完成观察（${b.progress.percent}%）</div>
+      ${overdueHtml}
+      ${nextHtml}
+      ${addForm}
+      <details class="slices" ${b.delivered ? "" : "open"}>
+        <summary>切片明细（${b.progress.total} 张）</summary>
+        <div id="sl-${esc(b.id)}">${b.slices.map(s => renderSlice(b, s)).join("")}</div>
+      </details>
+      ${deliver}
+    </article>`;
+}
+
+function render() {
+  renderStats();
+  $("#cards").innerHTML = model.batches.map(renderBatch).join("");
+  bindActions();
+}
+
+/* ---------- 交互 ---------- */
+
+function readField(card, name) {
+  const el = $(`[data-f="${name}"]`, card);
+  return el ? el.value.trim() : "";
+}
+
+function bindActions() {
+  $$("[data-act]").forEach(btn => {
+    btn.onclick = async () => {
+      const act = btn.dataset.act;
+      const batchId = btn.dataset.batch;
+      const sliceCode = btn.dataset.slice;
+      const card = btn.closest(".card");
+      try {
+        if (act === "add") {
+          const count = Number($("[data-add-count]", card).value) || 0;
+          const method = $("[data-add-method]", card).value.trim();
+          if (!count) return toast("请填写要添加的切片数量");
+          await api(`/api/batches/${encodeURIComponent(batchId)}/slices`,
+            { method: "POST", body: { count, ...(method ? { slices: Array.from({length: count}, () => ({ method })) } : {}) } });
+          toast(`已添加 ${count} 张切片`, "ok");
+        }
+        if (act === "advance") {
+          const body = {
+            operator: readField(card, "operator"),
+            basis: readField(card, "basis"),
+            at: readField(card, "at") || undefined,
+          };
+          const obs = readField(card, "observation");
+          if (obs) body.observation = obs;
+          remember(body.operator || null);
+          const r = await api(`/api/batches/${encodeURIComponent(batchId)}/slices/${encodeURIComponent(sliceCode)}/advance`,
+            { method: "POST", body });
+          toast(`${sliceCode} 已推进到「${r.record.stage}」`, "ok");
+        }
+        if (act === "obs") {
+          const body = { observation: readField(card, "observation2"), operator: readField(card, "operator2") };
+          await api(`/api/batches/${encodeURIComponent(batchId)}/slices/${encodeURIComponent(sliceCode)}/observation`,
+            { method: "PUT", body });
+          toast("观察结果已保存（已追加修订留痕）", "ok");
+        }
+        if (act === "deliver") {
+          const operator = $("[data-del-operator]", card).value.trim();
+          const basis = $("[data-del-basis]", card).value.trim();
+          await api(`/api/batches/${encodeURIComponent(batchId)}/deliver`,
+            { method: "POST", body: { operator, basis } });
+          toast("批次已交付，记录封存", "ok");
+        }
+        await load();
+      } catch (e) {
+        toast(`操作失败：${e.message}`);
+      }
+    };
+  });
+}
+
+// 记住上次使用的操作人，自动预填
+function remember(name) { try { if (name) localStorage.setItem("lastOperator", name); } catch {} }
+function lastOperator() { try { return localStorage.getItem("lastOperator") || ""; } catch { return ""; } }
+
+async function load() {
+  model = await api("/api/batches");
+  render();
+  const lo = lastOperator();
+  if (lo) $$('[data-f="operator"]').forEach(i => { if (!i.value) i.placeholder = lo; });
+}
+
+$("#reload").onclick = load;
+
+$("#registerForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const body = { sliceCount: Number(fd.get("sliceCount")) || 0 };
+  for (const [k, v] of fd.entries()) {
+    if (k === "sliceCount") continue;
+    if (String(v).trim()) body[k] = String(v).trim();
+  }
+  try {
+    const b = await api("/api/batches", { method: "POST", body });
+    toast(`批次 ${b.id} 已登记，建立 ${b.progress.total} 张切片`, "ok");
+    ev.target.reset();
+    $('input[name="sliceCount"]', ev.target).value = "3";
+    await load();
+  } catch (e) {
+    toast(`登记失败：${e.message}`);
+  }
+};
+
+load();
+</script>
+</body>
+</html>
