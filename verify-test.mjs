@@ -116,6 +116,45 @@ async function main() {
     let r = await call("POST", "/api/batches", {});
     ok(r.status === 400 && r.json.error === "missing_field", "空表单登记被拒绝", JSON.stringify(r.json));
 
+    /* ---------- 2b. 登记数量/清单严格校验：非法输入失败且不建立批次 ---------- */
+    console.log("\n=== 2b. 登记切片数量只接受 1-50 整数，清单必须为数组 ===");
+    const REG_BASE = {
+      project: "数量校验批", borehole: "ZK-Q", coreBox: "BX-Q", depth: "1-2m", registeredBy: "陆川",
+    };
+    const beforeIds = new Set((await call("GET", "/api/batches")).json.batches.map((x) => x.id));
+    const badRegs = [
+      ["小数 2.5", { ...REG_BASE, sliceCount: 2.5 }, "invalid_count"],
+      ["布尔 true", { ...REG_BASE, sliceCount: true }, "invalid_count"],
+      ["布尔 false", { ...REG_BASE, sliceCount: false }, "invalid_count"],
+      ["字符串 \"3\"", { ...REG_BASE, sliceCount: "3" }, "invalid_count"],
+      ["数量 0", { ...REG_BASE, sliceCount: 0 }, "invalid_count"],
+      ["负数 -1", { ...REG_BASE, sliceCount: -1 }, "invalid_count"],
+      ["数量 51 超上限", { ...REG_BASE, sliceCount: 51 }, "too_many_slices"],
+      ["完全不给数量/清单", { ...REG_BASE }, "missing_count"],
+      ["slices 为字符串", { ...REG_BASE, slices: "不是数组" }, "invalid_slices"],
+      ["slices 为对象", { ...REG_BASE, slices: {} }, "invalid_slices"],
+      ["slices 为布尔", { ...REG_BASE, slices: true }, "invalid_slices"],
+      ["slices 为空数组", { ...REG_BASE, slices: [] }, "empty_slices"],
+    ];
+    for (const [desc, body, expectErr] of badRegs) {
+      const rr = await call("POST", "/api/batches", body);
+      ok(rr.status === 400 && rr.json.error === expectErr,
+        `${desc} → 400 ${expectErr}`, `实际 ${rr.status} ${rr.json.error}: ${rr.json.message || ""}`);
+    }
+    {
+      const afterIds = new Set((await call("GET", "/api/batches")).json.batches.map((x) => x.id));
+      const created = [...afterIds].filter((id) => !beforeIds.has(id));
+      ok(created.length === 0, "所有非法登记均未建立批次（批次总数不变）", `意外新建：${created.join(",")}`);
+    }
+    // 合法边界整数 1 与 50 应成功建档
+    r = await call("POST", "/api/batches", { ...REG_BASE, project: "数量边界1", sliceCount: 1 });
+    ok(r.status === 201 && r.json.slices.length === 1, "数量 1：建档并建立 1 张切片");
+    r = await call("POST", "/api/batches", { ...REG_BASE, project: "数量边界50", sliceCount: 50 });
+    ok(r.status === 201 && r.json.slices.length === 50, "数量 50：建档并建立 50 张切片");
+    // 非空数组清单也合法
+    r = await call("POST", "/api/batches", { ...REG_BASE, project: "清单建档", slices: [{ method: "光片" }, { method: "薄片" }] });
+    ok(r.status === 201 && r.json.slices.length === 2, "非空 slices 清单：建档并建立 2 张切片");
+
     r = await call("POST", "/api/batches", {
       project: "西坡铁矿补勘", borehole: "ZK-31", coreBox: "BX-22",
       depth: "45.20-45.60m", registeredBy: "陆川",
@@ -138,7 +177,26 @@ async function main() {
     r = await call("POST", `/api/batches/${B}/slices`, {});
     ok(r.status === 400, "未提供数量被拒绝");
     r = await call("POST", `/api/batches/${B}/slices`, { count: 0 });
-    ok(r.status === 400, "数量为 0 被拒绝");
+    ok(r.status === 400 && r.json.error === "invalid_count", "数量为 0 被拒绝");
+    for (const [desc, body, code] of [
+      ["小数 2.5", { count: 2.5 }, "invalid_count"],
+      ["布尔 true", { count: true }, "invalid_count"],
+      ["布尔 false", { count: false }, "invalid_count"],
+      ['字符串 "2"', { count: "2" }, "invalid_count"],
+      ["负数", { count: -2 }, "invalid_count"],
+      ["数量 51", { count: 51 }, "too_many_slices"],
+      ["空数组", { slices: [] }, "empty_slices"],
+      ["清单为数字", { slices: 3 }, "invalid_slices"],
+      ["清单为布尔", { slices: false }, "invalid_slices"],
+    ]) {
+      const rr = await call("POST", `/api/batches/${B}/slices`, body);
+      ok(rr.status === 400 && rr.json.error === code, `批量添加 ${desc} → 400 ${code}`,
+        `实际 ${rr.status} ${rr.json.error}`);
+    }
+    {
+      const g = (await call("GET", `/api/batches/${B}`)).json;
+      ok(g.progress.total === 5, "所有非法添加被拒后切片总数仍为 5（状态未变）");
+    }
     r = await call("POST", `/api/batches/${B}/slices`, { slices: [] });
     ok(r.status === 400 && r.json.error === "empty_slices", "空切片清单 slices:[] 被拒绝并说明原因", r.json.message);
     r = await call("POST", `/api/batches/${B}/slices`, { slices: "不是数组" });

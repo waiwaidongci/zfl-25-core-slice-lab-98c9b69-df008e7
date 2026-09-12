@@ -206,6 +206,37 @@ function ownerFor(batch, stage) {
   return batch.owners?.[stage] || batch.registeredBy;
 }
 
+// 切片数量：只接受 1-50 的整数（数字类型）；小数、布尔、文本、越界一律拒绝
+function strictSliceCount(raw, field) {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || !Number.isInteger(raw)) {
+    throw new HttpError(400, "invalid_count", `切片数量（${field}）必须是 1-50 的整数，不接受小数、布尔值或文本`);
+  }
+  if (raw < 1) throw new HttpError(400, "invalid_count", `切片数量（${field}）必须为 1-50 的正整数，不能为 0 或负数`);
+  if (raw > 50) throw new HttpError(400, "too_many_slices", "单次最多建立 50 张切片");
+  return raw;
+}
+// 解析“切片清单 slices（非空数组）”或“数量字段 countField（1-50 整数）”，二者必须合法地给出其一
+function resolveSliceSpecs(input, countField) {
+  const hasList = input.slices !== undefined && input.slices !== null;
+  const rawCount = input[countField];
+  const hasCount = rawCount !== undefined && rawCount !== null && String(rawCount).trim() !== "";
+  if (hasList) {
+    if (!Array.isArray(input.slices)) {
+      throw new HttpError(400, "invalid_slices", "切片清单（slices）必须是数组，每项可含 method 字段；当前不是数组，已拒绝且未建立批次");
+    }
+    if (input.slices.length === 0) {
+      throw new HttpError(400, "empty_slices", `切片清单为空：至少需要 1 张切片，请提供非空 slices 清单，或用 ${countField} 指定 1-50 的整数数量`);
+    }
+    if (input.slices.length > 50) throw new HttpError(400, "too_many_slices", "单次最多建立 50 张切片");
+    return { specs: input.slices, count: input.slices.length };
+  }
+  if (!hasCount) {
+    throw new HttpError(400, "missing_count", `请提供切片数量（${countField}，1-50 的整数）或非空切片清单（slices）`);
+  }
+  const count = strictSliceCount(rawCount, countField);
+  return { specs: null, count };
+}
+
 function registerBatch(db, input) {
   const project = requireText(input, "project", "项目名称");
   const borehole = requireText(input, "borehole", "钻孔编号");
@@ -219,6 +250,9 @@ function registerBatch(db, input) {
     const v = optionalText(input, `owner_${stage}`);
     if (v) owners[stage] = v;
   }
+
+  // 数量/清单校验必须在建批次、分配编号之前完成：非法输入直接失败，不留任何痕迹
+  const { specs, count } = resolveSliceSpecs(input, "sliceCount");
 
   db.seq = (db.seq || 0) + 1;
   const date = new Date();
@@ -235,13 +269,8 @@ function registerBatch(db, input) {
     slices: [],
   };
 
-  // 登记时可同时建立多张切片（一次添加多张）：给 slices 清单或只给 sliceCount
-  const specs = Array.isArray(input.slices) ? input.slices : [];
-  const count = specs.length || Number(input.sliceCount) || 0;
-  if (count > 50) throw new HttpError(400, "too_many_slices", "单次最多建立 50 张切片");
-  if (count < 0) throw new HttpError(400, "invalid_count", "切片数量不合法");
   for (let i = 0; i < count; i++) {
-    const spec = specs[i] || {};
+    const spec = specs ? specs[i] || {} : {};
     batch.slices.push({
       code: `${id}-S${pad2(i + 1)}`,
       method: optionalText(spec, "method", 100) || null,
@@ -260,19 +289,7 @@ function registerBatch(db, input) {
 
 function addSlices(batch, input) {
   if (batch.delivered) throw new HttpError(409, "batch_locked", "批次已交付封存，不能再添加切片");
-  const hasList = input.slices !== undefined && input.slices !== null;
-  if (hasList && !Array.isArray(input.slices)) {
-    throw new HttpError(400, "invalid_slices", "切片清单必须是数组，每项可含 method 字段");
-  }
-  const specs = hasList ? input.slices : null;
-  if (specs && specs.length === 0) {
-    throw new HttpError(400, "empty_slices", "切片清单为空：至少需要添加 1 张切片（请提供非空 slices 清单，或改用 count 指定数量）");
-  }
-  const count = specs ? specs.length : Number(input.count) || 0;
-  if (!specs && (!Number.isInteger(count) || count <= 0)) {
-    throw new HttpError(400, "missing_count", "请提供要添加的切片数量（count，正整数）或非空切片清单（slices）");
-  }
-  if (count > 50) throw new HttpError(400, "too_many_slices", "单次最多添加 50 张切片");
+  const { specs, count } = resolveSliceSpecs(input, "count");
   const start = batch.slices.length;
   for (let i = 0; i < count; i++) {
     const spec = specs ? specs[i] || {} : {};
