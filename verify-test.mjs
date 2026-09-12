@@ -151,11 +151,28 @@ async function main() {
     const S1 = `${B}-S01`;
     r = await advance(B, S1, {});
     ok(r.status === 400 && r.json.error === "missing_stage", "未指定目标工序不能推进");
+
+    // 基准工序 from 必填，缺失/空白/非法都必须失败且不改变状态与记录
     r = await advance(B, S1, { stage: "取样" });
-    ok(r.status === 400 && r.json.error === "missing_field", "缺操作人/依据不能推进");
-    r = await advance(B, S1, { stage: "取样", operator: "陆川", basis: "" });
+    ok(r.status === 400 && r.json.error === "missing_from_stage", "缺基准工序 from → 400", r.json.message);
+    r = await advance(B, S1, { stage: "取样", from: "" });
+    ok(r.status === 400 && r.json.error === "missing_from_stage", "from 为空串 → 400", r.json.message);
+    r = await advance(B, S1, { stage: "取样", from: "   " });
+    ok(r.status === 400 && r.json.error === "missing_from_stage", "from 为纯空白 → 400（按空值处理）", r.json.message);
+    r = await advance(B, S1, { stage: "取样", from: null });
+    ok(r.status === 400 && r.json.error === "missing_from_stage", "from 为 null → 400");
+    r = await advance(B, S1, { stage: "取样", from: "打磨抛光" });
+    ok(r.status === 400 && r.json.error === "invalid_from_stage", "from 为非法工序名 → 400", r.json.message);
+    {
+      const s = await sliceState(B, S1);
+      ok(s.stage === null && s.records.length === 0, "所有缺/非法基准工序请求后状态与记录均未改变");
+    }
+
+    r = await advance(B, S1, { stage: "取样", from: "待取样" });
+    ok(r.status === 400 && r.json.error === "missing_field", "基准合法但缺操作人/依据不能推进");
+    r = await advance(B, S1, { stage: "取样", from: "待取样", operator: "陆川", basis: "" });
     ok(r.status === 400, "依据为空不能推进");
-    r = await advance(B, S1, { stage: "取样", operator: "陆川", basis: "取样规程", at: "not-a-time" });
+    r = await advance(B, S1, { stage: "取样", from: "待取样", operator: "陆川", basis: "取样规程", at: "not-a-time" });
     ok(r.status === 400 && r.json.error === "invalid_time", "非法时间格式被拒绝", JSON.stringify(r.json));
 
     r = await advance(B, S1, {
@@ -170,11 +187,11 @@ async function main() {
 
     /* ---------- 5. 非法跳步 / 回退 / 重复提交 ---------- */
     console.log("\n=== 5. 非法跳步 / 回退 / 重复提交必须失败 ===");
-    r = await advance(B, S1, { operator: "x", basis: "y", stage: "观察" });
+    r = await advance(B, S1, { from: "取样", operator: "x", basis: "y", stage: "观察" });
     ok(r.status === 409 && r.json.error === "illegal_transition", "取样后直跳观察 → 409 非法跳步", r.json.message);
-    r = await advance(B, S1, { operator: "x", basis: "y", stage: "取样" });
+    r = await advance(B, S1, { from: "取样", operator: "x", basis: "y", stage: "取样" });
     ok(r.status === 409 && r.json.error === "duplicate_submit", "重复提交取样 → 409 且不改写", r.json.message);
-    r = await advance(B, S1, { operator: "x", basis: "y", stage: "研磨" });
+    r = await advance(B, S1, { from: "取样", operator: "x", basis: "y", stage: "研磨" });
     ok(r.status === 409 && r.json.error === "illegal_transition", "跳过切割到研磨 → 409");
     r = await advance(B, S1, { operator: "x", basis: "y", stage: "不存在" });
     ok(r.status === 400, "未知工序 → 400");
@@ -345,7 +362,7 @@ async function main() {
       const s = g.json.slices.find((x) => x.code === S1);
       ok(s.stage === "观察" && s.observation === OBS, "观察结果已保存到切片与记录");
       ok(s.nextStage === null && !s.delivered, "五工序完成，等待批次交付");
-      r = await advance(B, S1, { stage: "观察", operator: "x", basis: "y" });
+      r = await advance(B, S1, { stage: "观察", from: "观察", operator: "x", basis: "y" });
       ok(r.status === 409 && r.json.error === "stage_already_done", "已观察完成再推进/回退 → 409");
     }
 
@@ -434,7 +451,7 @@ async function main() {
          g.deliveredAt === originalDelivered.deliveredAt,
         "库里的交付记录完全未被改写");
     }
-    r = await advance(B, S1, { stage: "切割", operator: "x", basis: "y" });
+    r = await advance(B, S1, { stage: "切割", from: "观察", operator: "x", basis: "y" });
     ok(r.status === 409 && r.json.error === "batch_locked", "已交付批次不能再推进工序");
     r = await call("POST", `/api/batches/${B}/slices`, { count: 1 });
     ok(r.status === 409 && r.json.error === "batch_locked", "已交付批次不能再添加切片");

@@ -294,16 +294,32 @@ function addSlices(batch, input) {
   return batch;
 }
 
+const FROM_NEW = "待取样";
 function normalizeFromStage(input) {
   const raw = input.from ?? input.expectedStage ?? input.baseStage;
-  if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
-  return String(raw).trim();
+  if (raw === undefined || raw === null) return undefined;
+  const v = String(raw).trim();
+  return v === "" ? undefined : v;
+}
+function validateFromStage(input) {
+  const from = normalizeFromStage(input);
+  if (from === undefined) {
+    throw new HttpError(400, "missing_from_stage",
+      "推进请求缺少基准工序（字段 from）：请填写该切片当前所处工序（未取样传“待取样”）后再推进，状态与记录未改变");
+  }
+  if (from !== FROM_NEW && !STAGES.includes(from)) {
+    throw new HttpError(400, "invalid_from_stage",
+      `基准工序“${from}”不合法，应为“待取样”或五工序之一（${STAGES.join("、")}）`);
+  }
+  return from;
 }
 
 function advanceSlice(batch, slice, input, targetStage) {
   if (batch.delivered) throw new HttpError(409, "batch_locked", "批次已交付封存，记录不可改写");
   if (slice.delivered) throw new HttpError(409, "slice_locked", "该切片已交付，不能再推进");
 
+  // 基准工序必填：缺失或为空直接拒绝，保证过期保护始终生效（与接口说明一致）
+  validateFromStage(input);
   const operator = requireText(input, "operator", "操作人");
   const basis = requireText(input, "basis", "依据（作业指导书/标准/任务单）", 300);
   const at = parseOperatedAt(input.at || input.operatedAt);
@@ -312,20 +328,17 @@ function advanceSlice(batch, slice, input, targetStage) {
   // 同一切片已被先到请求推进时，基准不再匹配——即使本请求稍后才到、
   // 错过了进行中窗口，也必须拒绝，避免旧页面/重试请求跨过多个工序。
   const from = normalizeFromStage(input);
-  if (from !== undefined) {
-    const baseNow = slice.stage ?? "待取样";
-    if (from !== baseNow) {
-      // 基准已过期：目标工序恰为当前工序 → 同一步骤重复提交；否则 → 跨工序冲突
-      if (targetStage === slice.stage) {
-        throw new HttpError(409, "duplicate_submit",
-          `该切片的“${targetStage}”推进已提交过（重复点击/重试），本次未写入任何记录，状态与记录保持不变`);
-      }
-      throw new HttpError(
-        409,
-        "concurrent_conflict",
-        `并发冲突：该切片已被先到请求推进到“${slice.stage ?? "待取样"}”，您基于“${from}”的请求来自过期页面或重复重试，未写入任何记录，请刷新工作台后按顺序操作`
-      );
+  const baseNow = slice.stage ?? FROM_NEW;
+  if (from !== baseNow) {
+    if (targetStage === slice.stage) {
+      throw new HttpError(409, "duplicate_submit",
+        `该切片的“${targetStage}”推进已提交过（重复点击/重试），本次未写入任何记录，状态与记录保持不变`);
     }
+    throw new HttpError(
+      409,
+      "concurrent_conflict",
+      `并发冲突：该切片已被先到请求推进到“${slice.stage ?? FROM_NEW}”，您基于“${from}”的请求来自过期页面或重复重试，未写入任何记录，请刷新工作台后按顺序操作`
+    );
   }
 
   const expected = nextStageOf(slice);
@@ -576,7 +589,7 @@ function runAdvance({ batchId, sliceCode, target, input }) {
           // 后到请求若明确基于先到请求推进后的新状态，则是独立的“下一步”，允许执行；
           // 否则（基于同一初始状态）按重复/冲突拒绝。
           const from = normalizeFromStage(input);
-          if (from !== undefined && from === (first.r.slice.stage ?? "待取样")) {
+          if (from !== undefined && from === (first.r.slice.stage ?? FROM_NEW)) {
             return attempt();
           }
           return rejectAsStale(first.r.slice);
@@ -673,6 +686,7 @@ const server = http.createServer(async (req, res) => {
         throw new HttpError(400, "missing_stage", "推进请求必须指定目标工序（字段 stage），请由“推进到下一工序”按钮提交");
       }
       if (!STAGES.includes(target)) throw new HttpError(400, "unknown_stage", `未知工序：${target}`);
+      validateFromStage(input); // 基准工序必填，缺失/为空直接 400，不进入推进流程
       const result = await runAdvance({ batchId, sliceCode, target, input });
       return sendJson(res, 200, { batch: batchView(result.batch, Date.now()), record: result.record });
     }

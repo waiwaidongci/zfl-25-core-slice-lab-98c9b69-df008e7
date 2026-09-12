@@ -19,8 +19,9 @@ npm start        # http://localhost:3025
   登记时一次建立多张切片（编号自动生成，如 `B20260912-001-S01`）。
 - **批量添加切片**：登记后仍可成批追加；已交付批次封存，不能再加。
 - **顺序推进**：每张切片只能推进到唯一的下一工序，请求必须显式给出目标工序（`stage`）
-  和它所基于的当前工序（`from`，未取样传 `待取样`）；每步必须填写操作人与依据，时间可补录
-  （默认当前时间）。非法跳步、回退、重复提交均返回 `409`，状态与历史记录不变。
+  和它所基于的当前工序（`from`，未取样传 `待取样`）——两者均为必填，缺失或为空返回
+  `400 missing_from_stage`（或 `invalid_from_stage`），状态与记录不变。每步必须填写操作人
+  与依据，时间可补录（默认当前时间）。非法跳步、回退、重复提交均返回 `409`，历史记录不变。
 - **并发控制（双重）**：
   - 同一切片同一工序的**并发重复请求**（双击、重试）只允许先到的一个成功，其余
     `409 duplicate_submit`，不会连续前进两步或多写记录；
@@ -40,7 +41,7 @@ npm start        # http://localhost:3025
 | GET | `/api/batches` | 工作台总览（进度/逾期/下一步负责人） |
 | POST | `/api/batches` | 批次登记（`sliceCount` 或 `slices[]` 一次多片） |
 | POST | `/api/batches/:id/slices` | 批量添加切片（`count` 正整数，或非空 `slices[]`；空清单返回 400） |
-| POST | `/api/batches/:id/slices/:code/advance` | 推进到 `stage`（必填），并带 `from` 基准工序；另含 `operator`/`basis`/`at`，观察时需 `observation`。并发重复返回 `409 duplicate_submit`，过期跨工序返回 `409 concurrent_conflict` |
+| POST | `/api/batches/:id/slices/:code/advance` | 推进到 `stage`（必填），并带必填基准工序 `from`；另含 `operator`/`basis`/`at`，观察时需 `observation`。缺/空 `from` 返回 400；并发重复返回 `409 duplicate_submit`，过期跨工序返回 `409 concurrent_conflict` |
 | PUT | `/api/batches/:id/slices/:code/observation` | 观察结果补录修订（留痕） |
 | POST | `/api/batches/:id/deliver` | 批次交付（重复交付 409，不改写） |
 
@@ -50,10 +51,11 @@ npm start        # http://localhost:3025
 node verify-test.mjs
 ```
 
-在独立端口（3125）启动临时实例并覆盖 90 项断言。时间一律使用显式 UTC（`Z`），
+在独立端口（3125）启动临时实例并覆盖 96 项断言。时间一律使用显式 UTC（`Z`），
 在未设置 `TZ` 的默认环境及 UTC±多时区下结果一致；内容覆盖创建、批量添加（含空清单拒绝）、
-顺序推进、同目标/跨目标并发去重（含串行到达的过期请求）、观察与交付全链路，以及空观察、
-重复提交、非法跳步/回退、重复交付防改写、封存只读、SLA 逾期和重启后数据保留。
+推进入参校验（含基准工序缺失/为空/非法）、顺序推进、同目标/跨目标并发去重（含串行到达的过期
+请求）、观察与交付全链路，以及空观察、重复提交、非法跳步/回退、重复交付防改写、
+封存只读、SLA 逾期和重启后数据保留。
 
 ```bash
 node verify-test.mjs          # 默认环境
