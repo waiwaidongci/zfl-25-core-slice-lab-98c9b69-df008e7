@@ -294,6 +294,12 @@ function addSlices(batch, input) {
   return batch;
 }
 
+function normalizeFromStage(input) {
+  const raw = input.from ?? input.expectedStage ?? input.baseStage;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
+  return String(raw).trim();
+}
+
 function advanceSlice(batch, slice, input, targetStage) {
   if (batch.delivered) throw new HttpError(409, "batch_locked", "批次已交付封存，记录不可改写");
   if (slice.delivered) throw new HttpError(409, "slice_locked", "该切片已交付，不能再推进");
@@ -301,6 +307,26 @@ function advanceSlice(batch, slice, input, targetStage) {
   const operator = requireText(input, "operator", "操作人");
   const basis = requireText(input, "basis", "依据（作业指导书/标准/任务单）", 300);
   const at = parseOperatedAt(input.at || input.operatedAt);
+
+  // 乐观并发：客户端提交它所基于的当前工序（未取样传“待取样”）。
+  // 同一切片已被先到请求推进时，基准不再匹配——即使本请求稍后才到、
+  // 错过了进行中窗口，也必须拒绝，避免旧页面/重试请求跨过多个工序。
+  const from = normalizeFromStage(input);
+  if (from !== undefined) {
+    const baseNow = slice.stage ?? "待取样";
+    if (from !== baseNow) {
+      // 基准已过期：目标工序恰为当前工序 → 同一步骤重复提交；否则 → 跨工序冲突
+      if (targetStage === slice.stage) {
+        throw new HttpError(409, "duplicate_submit",
+          `该切片的“${targetStage}”推进已提交过（重复点击/重试），本次未写入任何记录，状态与记录保持不变`);
+      }
+      throw new HttpError(
+        409,
+        "concurrent_conflict",
+        `并发冲突：该切片已被先到请求推进到“${slice.stage ?? "待取样"}”，您基于“${from}”的请求来自过期页面或重复重试，未写入任何记录，请刷新工作台后按顺序操作`
+      );
+    }
+  }
 
   const expected = nextStageOf(slice);
   if (expected === null) {
@@ -496,24 +522,26 @@ function normalizeTargetStage(input) {
   return String(raw).trim();
 }
 
-/* ---------- 推进防重（同一切片 → 同一目标工序的并发去重） ----------
+/* ---------- 推进并发控制（切片级，同初始状态只允许一次推进） ----------
  *
- * 背景：串行写锁（withDb）只保证不互相覆盖。两个相同的推进请求并发时，
- * 第一个把 取样→切割 落盘后，第二个重新加载到新状态，会被当成“推进到研磨”
- * 再成功一次 —— 于是连续前进两步、多写一条记录。
+ * 背景：串行写锁（withDb）只保证不互相覆盖。同一张切片基于同一初始状态收到
+ * 多个推进请求时（双击、过期页面重试），若按“切片+目标工序”分别加锁，那么
+ * 目标不同的两个请求会各自执行：第一个 取样→切割 落盘后，第二个读到新状态，
+ * 其目标“研磨”恰好是新的下一步，于是连续前进两步、多写一条记录。
  *
- * 顺序重发没有这个问题：状态机会发现目标工序已完成并拒绝；唯一漏洞是后到
- * 请求在首个请求落盘前读到了旧状态。这里加“进行中槽位”：同一
- * （切片, 目标工序）只允许一个请求执行，其余并发请求等首个结果——
- *   - 首个成功：后到的一律 409 duplicate_submit，不写任何记录；
- *   - 首个失败（如缺依据/空观察）：后到请求作为独立尝试再执行一次，
- *     不会因为别人的校验失败被误伤。
+ * 规则：进行中槽位以“切片”为单位。同一切片的并发推进请求——无论目标工序
+ * 是否相同——只有先到的一个执行；其余等待首个结果后按推进后的新状态判定：
+ *   - 目标工序已是当前工序：409 duplicate_submit（相同请求重复提交）；
+ *   - 目标工序是其他任何工序：409 concurrent_conflict（过期/重试请求不得跨过
+ *     多个步骤），状态与记录保持先到请求写入的一次推进；
+ *   - 首个请求失败（缺依据、空观察等）：槽位释放，后到请求作为独立尝试执行，
+ *     不被别人的校验失败误伤。
  * 槽位声明在同一事件循环轮次内同步完成，Node 单线程下天然原子。
  */
-const inflightAdvance = new Map(); // `${batchId}|${sliceCode}|${target}` -> Promise<settled>
+const inflightAdvance = new Map(); // `${batchId}|${sliceCode}` -> Promise<settled>
 
 function runAdvance({ batchId, sliceCode, target, input }) {
-  const key = `${batchId}|${sliceCode}|${target}`;
+  const key = `${batchId}|${sliceCode}`;
   const execute = () =>
     withDb(async (db) => {
       const b = findBatch(db, batchId);
@@ -523,18 +551,37 @@ function runAdvance({ batchId, sliceCode, target, input }) {
       return r;
     });
   const asSettled = (p) => p.then((r) => ({ ok: true, r }), (e) => ({ ok: false, e }));
-  const dupError = () => new HttpError(
-    409,
-    "duplicate_submit",
-    `检测到并发重复提交：该切片的“${target}”推进已由先到请求完成，后到请求未写入任何记录，切片仅前进一步`
-  );
+
+  function rejectAsStale(firstSlice) {
+    if (target === firstSlice.stage) {
+      throw new HttpError(
+        409,
+        "duplicate_submit",
+        `检测到并发重复提交：该切片的“${target}”推进已由先到请求完成，后到请求未写入任何记录，切片仅前进一步`
+      );
+    }
+    throw new HttpError(
+      409,
+      "concurrent_conflict",
+      `检测到并发冲突：该切片已被先到请求推进到“${firstSlice.stage}”，每次只允许完成一道工序；` +
+        `您请求的“${target}”来自过期页面或重复重试，未写入任何记录，请刷新工作台后按顺序操作`
+    );
+  }
 
   function attempt() {
     const existing = inflightAdvance.get(key);
     if (existing) {
       return existing.then((first) => {
-        if (first.ok) throw dupError();
-        return attempt(); // 首个失败（校验未过），本请求独立重试一次
+        if (first.ok) {
+          // 后到请求若明确基于先到请求推进后的新状态，则是独立的“下一步”，允许执行；
+          // 否则（基于同一初始状态）按重复/冲突拒绝。
+          const from = normalizeFromStage(input);
+          if (from !== undefined && from === (first.r.slice.stage ?? "待取样")) {
+            return attempt();
+          }
+          return rejectAsStale(first.r.slice);
+        }
+        return attempt(); // 首个失败（校验未过），槽位已释放，本请求独立重试
       });
     }
     const settled = asSettled(execute());

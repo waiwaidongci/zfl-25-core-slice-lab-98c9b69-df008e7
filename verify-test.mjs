@@ -159,7 +159,7 @@ async function main() {
     ok(r.status === 400 && r.json.error === "invalid_time", "非法时间格式被拒绝", JSON.stringify(r.json));
 
     r = await advance(B, S1, {
-      stage: "取样", operator: "陆川", basis: "取样作业指导书 v3.2", at: "2026-09-10T09:00",
+      stage: "取样", from: "待取样", operator: "陆川", basis: "取样作业指导书 v3.2", at: "2026-09-10T09:00Z",
     });
     ok(r.status === 200 && r.json.record.stage === "取样", "S01 完成取样", JSON.stringify(r.json?.record));
     ok(r.json.record.operator === "陆川" && r.json.record.basis.includes("v3.2"), "记录含操作人与依据");
@@ -193,9 +193,9 @@ async function main() {
     const CB = cb.json.id;
     const S5 = `${CB}-S05`;
     {
-      // 5 个完全相同的“推进到取样”请求同时发出
+      // 5 个完全相同的“从待取样推进到取样”请求同时发出
       const results = await Promise.all(Array.from({ length: 5 }, () =>
-        advance(CB, S5, { stage: "取样", operator: "陆川", basis: "取样作业指导书 v3.2" })));
+        advance(CB, S5, { stage: "取样", from: "待取样", operator: "陆川", basis: "取样作业指导书 v3.2" })));
       const codes = results.map((x) => x.status);
       const n200 = codes.filter((c) => c === 200).length;
       const n409 = results.filter((x) => x.status === 409 && x.json.error === "duplicate_submit").length;
@@ -203,8 +203,8 @@ async function main() {
       const s = await sliceState(CB, S5);
       ok(s.stage === "取样" && s.records.length === 1,
         "只前进了一步、只写了一条记录", `stage=${s.stage} records=${s.records.length}`);
-      // 落盘后顺序重放同一请求仍应失败且不变
-      const replay = await advance(CB, S5, { stage: "取样", operator: "陆川", basis: "取样作业指导书 v3.2" });
+      // 落盘后顺序重放同一请求（错过进行中窗口）仍应被乐观锁拒绝且不变
+      const replay = await advance(CB, S5, { stage: "取样", from: "待取样", operator: "陆川", basis: "取样作业指导书 v3.2" });
       ok(replay.status === 409 && replay.json.error === "duplicate_submit", "完成后重放相同请求 → 409", replay.json.message);
       const s2 = await sliceState(CB, S5);
       ok(s2.stage === "取样" && s2.records.length === 1, "重放后状态/记录依旧不变");
@@ -213,46 +213,107 @@ async function main() {
       // 不同切片的相同目标工序并发，互不影响
       const S3 = `${CB}-S03`, S4 = `${CB}-S04`;
       const [a, c] = await Promise.all([
-        advance(CB, S3, { stage: "取样", operator: "陆川", basis: "取样规程" }),
-        advance(CB, S4, { stage: "取样", operator: "陆川", basis: "取样规程" }),
+        advance(CB, S3, { stage: "取样", from: "待取样", operator: "陆川", basis: "取样规程" }),
+        advance(CB, S4, { stage: "取样", from: "待取样", operator: "陆川", basis: "取样规程" }),
       ]);
       ok(a.status === 200 && c.status === 200, "不同切片并发推进各自成功（不会被互相判重）");
 
       // 同一张切片并发“推进到切割”：仍只允许一次
       const cuts = await Promise.all([
-        advance(CB, S3, { stage: "切割", operator: "高岩", basis: "切割规程", at: "2026-09-10T13:00" }),
-        advance(CB, S3, { stage: "切割", operator: "高岩", basis: "切割规程", at: "2026-09-10T13:05" }),
+        advance(CB, S3, { stage: "切割", from: "取样", operator: "高岩", basis: "切割规程", at: "2026-09-10T13:00Z" }),
+        advance(CB, S3, { stage: "切割", from: "取样", operator: "高岩", basis: "切割规程", at: "2026-09-10T13:05Z" }),
       ]);
       const okCount = cuts.filter((x) => x.status === 200).length;
       const dupCount = cuts.filter((x) => x.status === 409 && x.json.error === "duplicate_submit").length;
-      ok(okCount === 1 && dupCount === 1, "同切片同目标并发：一成一拒（后到请求的时间不会覆盖先到记录）");
+      ok(okCount === 1 && dupCount === 1, "同切片同目标并发：一成一拒 duplicate_submit（后到请求的时间不会覆盖先到记录）");
       const s3 = await sliceState(CB, S3);
       ok(s3.stage === "切割" && s3.records.length === 2 && s3.records[1].at === "2026-09-10T13:00:00.000Z",
-        "保留先到请求写入的记录（13:00），未被 13:05 覆盖", JSON.stringify(s3.records.map(r => r.at)));
+        "保留先到请求写入的记录（13:00Z），未被 13:05Z 覆盖", JSON.stringify(s3.records.map(r => r.at)));
     }
     {
       // 先到请求校验失败时，不写入、释放槽位；并发的同样请求也都失败，随后合法请求可正常推进
       const S2 = `${CB}-S02`;
       const bad = await Promise.all(Array.from({ length: 3 }, () =>
-        advance(CB, S2, { stage: "取样", operator: "", basis: "" })));
+        advance(CB, S2, { stage: "取样", from: "待取样", operator: "", basis: "" })));
       ok(bad.every((x) => x.status === 400), "3 个并发非法请求全部 400（先到失败不连累后到得到错误语义）");
       const s = await sliceState(CB, S2);
       ok(s.stage === null && s.records.length === 0, "全部失败后切片仍在待取样、无任何记录");
-      const good = await advance(CB, S2, { stage: "取样", operator: "陆川", basis: "取样规程" });
+      const good = await advance(CB, S2, { stage: "取样", from: "待取样", operator: "陆川", basis: "取样规程" });
       ok(good.status === 200, "失败释放槽位后，合法请求可以正常推进", good.json?.message || "");
+    }
+
+    /* ---------- 5c. 跨目标并发：同一初始状态、目标工序不同也不得连跳 ---------- */
+    console.log("\n=== 5c. 跨目标工序并发只允许一次推进（过期页面/重复重试不得跨多步）===");
+    {
+      // 全新切片，同时请求“切割”和“研磨”——取样未做，两者本身都非法，均不得成功
+      const SX = `${CB}-S01`;
+      const [rCut, rGrind] = await Promise.all([
+        advance(CB, SX, { stage: "切割", from: "待取样", operator: "高岩", basis: "切割规程" }),
+        advance(CB, SX, { stage: "研磨", from: "待取样", operator: "韩砂", basis: "磨片规程" }),
+      ]);
+      ok([rCut, rGrind].every((x) => x.status === 409 && x.json.error === "illegal_transition"),
+        "待取样切片上并发 {切割,研磨}：二者都是非法跳步，全部 409",
+        JSON.stringify([rCut.status, rCut.json.error, rGrind.status, rGrind.json.error]));
+      const sx = await sliceState(CB, SX);
+      ok(sx.stage === null && sx.records.length === 0, "非法跨目标并发后切片仍停在待取样、无记录");
+    }
+    {
+      // 先确认 S05 已在“取样”（5b 的 5 连请求结果），再基于同一初始状态（from=取样）并发 {切割, 研磨, 染色}
+      const target = `${CB}-S05`;
+      const pre = await sliceState(CB, target);
+      ok(pre.code === target && pre.stage === "取样", "前置：S05 当前在取样");
+      const beforeN = pre.records.length;
+      const res = await Promise.all([
+        advance(CB, target, { stage: "切割", from: "取样", operator: "高岩", basis: "切割规程", at: "2026-09-10T13:00Z" }),
+        advance(CB, target, { stage: "研磨", from: "取样", operator: "韩砂", basis: "磨片规程", at: "2026-09-10T13:05Z" }),
+        advance(CB, target, { stage: "染色", from: "取样", operator: "苏染", basis: "染色规范", at: "2026-09-10T13:10Z" }),
+      ]);
+      const codes = res.map((x) => `${x.status}:${x.json.error || "ok"}`);
+      const n200 = res.filter((x) => x.status === 200).length;
+      ok(n200 === 1, `{切割,研磨,染色} 基于“取样”并发：恰好 1 个成功（实际 ${codes.join(" / ")}）`);
+      const winner = res.find((x) => x.status === 200);
+      ok(winner.json.record.stage === "切割", "先到成功者只推进到“切割”，不会因后到请求连跳");
+      ok(res.filter((x) => x.json.error === "concurrent_conflict").length === 2,
+        "跨目标的后到请求均命中 concurrent_conflict（过期页面/重试不得跨多步）");
+      const after = await sliceState(CB, target);
+      ok(after.stage === "切割" && after.records.length === beforeN + 1 &&
+         after.records[after.records.length - 1].at === "2026-09-10T13:00:00.000Z",
+        "只新增一条切割记录（13:00Z），研磨/染色请求未写入任何内容",
+        `stage=${after.stage} records=${after.records.length}`);
+    }
+    {
+      // 关键：请求“串行到达”（错过进行中窗口）时，乐观基准 from 仍须挡住过期跨工序请求
+      const target = `${CB}-S05`; // 当前在“切割”
+      const pre = await sliceState(CB, target);
+      ok(pre.stage === "切割", "前置：S05 已被并发测试推进到切割");
+      const beforeN = pre.records.length;
+      // 两个都声称基于旧状态“取样”，且一个发到研磨、一个发到染色——依次、非并发
+      const g1 = await advance(CB, target, { stage: "研磨", from: "取样", operator: "韩砂", basis: "磨片规程" });
+      const g2 = await advance(CB, target, { stage: "染色", from: "取样", operator: "苏染", basis: "染色规范" });
+      ok(g1.status === 409 && g1.json.error === "concurrent_conflict" &&
+         g2.status === 409 && g2.json.error === "concurrent_conflict",
+        "串行到达的过期请求（from=取样，当前已切割）也被拒绝，不依赖并发窗口",
+        JSON.stringify([g1.json.error, g2.json.error]));
+      const mid = await sliceState(CB, target);
+      ok(mid.stage === "切割" && mid.records.length === beforeN, "两个过期请求后状态/记录均不变");
+      // 基于最新状态“切割”的正常下一步应成功，主流程不受影响
+      const legit = await advance(CB, target, { stage: "研磨", from: "切割", operator: "韩砂", basis: "磨片规程" });
+      ok(legit.status === 200 && legit.json.record.stage === "研磨", "刷新后基于当前工序的正常推进成功（主流程正常）");
+      const fin = await sliceState(CB, target);
+      ok(fin.stage === "研磨" && fin.records.length === beforeN + 1, "正常推进恰好再进一步、多一条记录");
     }
 
     /* ---------- 6. 正常推进切割/研磨/染色 ---------- */
     console.log("\n=== 6. 正常推进 切割→研磨→染色（显式目标工序与时间）===");
-    for (const [stage, operator, basis, hour] of [
-      ["切割", "高岩", "切割作业指导书 v3.2", 12],
-      ["研磨", "韩砂", "磨片作业指导书 v2.5", 18],
-      ["染色", "苏染", "茜素红-S 染色规范 v1.8", 22],
+    for (const [stage, operator, basis, hour, from] of [
+      ["切割", "高岩", "切割作业指导书 v3.2", 12, "取样"],
+      ["研磨", "韩砂", "磨片作业指导书 v2.5", 18, "切割"],
+      ["染色", "苏染", "茜素红-S 染色规范 v1.8", 22, "研磨"],
     ]) {
       const rr = await advance(B, S1, {
-        stage, operator, basis, at: `2026-09-10T${hour}:00`,
+        stage, from, operator, basis, at: `2026-09-10T${hour}:00Z`,
       });
-      ok(rr.status === 200 && rr.json.record.stage === stage, `S01 完成「${stage}」`, rr.json?.message || "");
+      ok(rr.status === 200 && rr.json.record.stage === stage, `S01 完成「${stage}」（基准 ${from}）`, rr.json?.message || "");
     }
     {
       const g = await call("GET", `/api/batches/${B}`);
@@ -266,7 +327,7 @@ async function main() {
     /* ---------- 7. 观察：空结果拒绝；录入后可完成 ---------- */
     console.log("\n=== 7. 观察结果为空不能完成观察 ===");
     r = await advance(B, S1, {
-      stage: "观察", operator: "顾鉴", basis: "岩矿鉴定规范", at: "2026-09-11T10:00",
+      stage: "观察", from: "染色", operator: "顾鉴", basis: "岩矿鉴定规范", at: "2026-09-11T10:00Z",
     });
     ok(r.status === 400 && r.json.error === "observation_required", "空观察结果 → 400 且状态停在染色", r.json.message);
     {
@@ -276,7 +337,7 @@ async function main() {
     }
     const OBS = "磁铁石英岩，细粒变晶结构，条带状构造；金属矿物以磁铁矿为主（约 18%），石英呈定向拉长，局部见黄铁矿细脉。";
     r = await advance(B, S1, {
-      stage: "观察", operator: "顾鉴", basis: "岩矿鉴定规范 DZ/T 0275", at: "2026-09-11T10:20", observation: OBS,
+      stage: "观察", from: "染色", operator: "顾鉴", basis: "岩矿鉴定规范 DZ/T 0275", at: "2026-09-11T10:20Z", observation: OBS,
     });
     ok(r.status === 200 && r.json.record.stage === "观察", "录入观察结果后完成观察");
     {
@@ -299,16 +360,18 @@ async function main() {
     {
       const S2 = `${B}-S02`;
       let hour = 8;
+      let base = "待取样";
       for (const [stage, op, bs] of [
         ["取样", "陆川", "取样规程"], ["切割", "高岩", "切割规程"],
         ["研磨", "韩砂", "磨片规程"], ["染色", "苏染", "染色规范"],
       ]) {
         await advance(B, S2,
-          { stage, operator: op, basis: bs, at: `2026-09-11T${String(hour++).padStart(2, "0")}:00` });
+          { stage, from: base, operator: op, basis: bs, at: `2026-09-11T${String(hour++).padStart(2, "0")}:00Z` });
+        base = stage;
       }
-      // 染色→观察时给空白串也必须失败
+      // 染色→观察时给空白串也必须失败（基准工序仍为染色）
       const rr = await advance(B, S2,
-        { stage: "观察", operator: "顾鉴", basis: "鉴定规范", at: "2026-09-11T17:00", observation: "   " });
+        { stage: "观察", from: "染色", operator: "顾鉴", basis: "鉴定规范", at: "2026-09-11T17:00Z", observation: "   " });
       ok(rr.status === 400 && rr.json.error === "observation_required", "纯空白观察结果同样拒绝");
     }
 
@@ -330,14 +393,15 @@ async function main() {
         if (STAGES_IDX(s.stage) >= STAGES_IDX(stage)) continue;
         const hh = String(dayHour++).padStart(2, "0");
         await advance(B, code,
-          { stage, operator: plan[stage].op, basis: plan[stage].bs, at: `2026-09-11T${hh}:30` });
+          { stage, from: s.stage ?? "待取样", operator: plan[stage].op, basis: plan[stage].bs, at: `2026-09-11T${hh}:30Z` });
+        s.stage = stage; // 本地同步基准，便于下一步 from
       }
       g = await call("GET", `/api/batches/${B}`);
       s = g.json.slices.find((x) => x.code === code);
       if (s.stage !== "观察") {
         await advance(B, code, {
-          stage: "观察", operator: "顾鉴", basis: "岩矿鉴定规范 DZ/T 0275",
-          at: "2026-09-11T19:00", observation: `切片 ${code}：粒状结构，矿物组成均匀，未见显著矿化，综合判定为围岩样品。`,
+          stage: "观察", from: s.stage ?? "待取样", operator: "顾鉴", basis: "岩矿鉴定规范 DZ/T 0275",
+          at: "2026-09-11T19:00Z", observation: `切片 ${code}：粒状结构，矿物组成均匀，未见显著矿化，综合判定为围岩样品。`,
         });
       }
     }
@@ -348,7 +412,7 @@ async function main() {
     }
     const DEL_BASIS = "岩矿鉴定报告 BG-2026-0911-31 归档";
     r = await call("POST", `/api/batches/${B}/deliver`,
-      { operator: "顾鉴", basis: DEL_BASIS, at: "2026-09-12T09:00" });
+      { operator: "顾鉴", basis: DEL_BASIS, at: "2026-09-12T09:00Z" });
     ok(r.status === 200 && r.json.delivered && r.json.status === "已交付", "批次交付成功");
     ok(r.json.deliveryRecord.operator === "顾鉴" && r.json.deliveryRecord.basis === DEL_BASIS,
       "交付记录含操作人/时间/依据", JSON.stringify(r.json.deliveryRecord));
@@ -359,7 +423,7 @@ async function main() {
     console.log("\n=== 10. 重复交付失败且原记录不变；已交付批次封存 ===");
     const originalDelivered = r.json;
     const r2 = await call("POST", `/api/batches/${B}/deliver`,
-      { operator: "冒名顶替者", basis: "试图改写的依据", at: "2026-12-31T00:00" });
+      { operator: "冒名顶替者", basis: "试图改写的依据", at: "2026-12-31T00:00Z" });
     ok(r2.status === 409 && r2.json.error === "already_delivered", "重复交付 → 409 失败", r2.json.message);
     ok(r2.json.details?.deliveryRecord?.operator === "顾鉴" &&
        r2.json.details.deliveryRecord.basis === DEL_BASIS,
@@ -387,7 +451,7 @@ async function main() {
     const B2 = r.json.id;
     const T1 = `${B2}-S01`;
     await advance(B2, T1,
-      { stage: "取样", operator: "陆川", basis: "规程", at: "2026-09-10T08:00" }); // 取样：24h 时限，已超约 24h
+      { stage: "取样", from: "待取样", operator: "陆川", basis: "规程", at: "2026-09-10T08:00Z" }); // 取样：24h 时限，已超约 24h
     {
       const g = await call("GET", `/api/batches/${B2}`);
       const s = g.json.slices[0];
@@ -397,7 +461,7 @@ async function main() {
       ok(!!listed, "工作台批次级逾期清单包含该切片");
     }
     r = await advance(B2, T1,
-      { stage: "切割", operator: "高岩", basis: "切割规程", at: "2026-09-12T07:00" }); // 切割刚进入，未逾期
+      { stage: "切割", from: "取样", operator: "高岩", basis: "切割规程", at: "2026-09-12T07:00Z" }); // 切割刚进入，未逾期
     ok(r.status === 200, "切割推进成功");
     {
       const g = await call("GET", `/api/batches/${B2}`);

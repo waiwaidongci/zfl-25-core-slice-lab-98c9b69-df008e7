@@ -216,7 +216,7 @@ function renderSlice(batch, s) {
         </div>
         <div><label>依据（作业指导书 / 标准 / 任务单）*</label><input data-f="basis" placeholder="如：制片作业指导书 v3.2 / 任务单 ZK17-09"></div>
         ${needObs ? `<div><label>观察结果 *（为空不能完成观察，也不能交付）</label><textarea data-f="observation" placeholder="矿物组成、结构构造、矿化特征……"></textarea></div>` : ""}
-        <div><button class="small" data-act="advance" data-batch="${esc(batch.id)}" data-slice="${esc(s.code)}" data-target="${esc(s.nextStage)}">推进到「${esc(s.nextStage)}」</button></div>
+        <div><button class="small" data-act="advance" data-batch="${esc(batch.id)}" data-slice="${esc(s.code)}" data-target="${esc(s.nextStage)}" data-from="${esc(s.stage || "待取样")}">推进到「${esc(s.nextStage)}」</button></div>
       </div>`;
   }
   let obsEdit = "";
@@ -335,6 +335,7 @@ function bindActions() {
         if (act === "advance") {
           const body = {
             stage: btn.dataset.target,           // 目标工序：服务端据此识别并发重复提交
+            from: btn.dataset.from,              // 基准工序：乐观并发，防过期页面/重试跨多步
             operator: readField(card, "operator"),
             basis: readField(card, "basis"),
             at: readField(card, "at") || undefined,
@@ -365,6 +366,10 @@ function bindActions() {
         await load();
       } catch (e) {
         toast(`操作失败：${e.message}`);
+        // 并发冲突/重复提交时刷新工作台，确保用户看到最新工序，避免再用过期页面操作
+        if (["concurrent_conflict", "duplicate_submit", "batch_locked", "slice_locked"].includes(e.code)) {
+          await load();
+        }
       }
     };
   });
