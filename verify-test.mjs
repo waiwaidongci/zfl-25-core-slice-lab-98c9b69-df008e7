@@ -74,6 +74,14 @@ async function resetDb() {
 function getBatch(model, id) {
   return model.batches.find((b) => b.id === id);
 }
+// 推进到指定目标工序（stage 现在为必填）
+function advance(batchId, sliceCode, body) {
+  return call("POST", `/api/batches/${batchId}/slices/${sliceCode}/advance`, body);
+}
+function sliceState(batchId, code) {
+  return call("GET", `/api/batches/${batchId}`).then((r) =>
+    r.json.slices.find((x) => x.code === code));
+}
 
 async function main() {
   console.log("\n=== 0. 准备干净测试库并启动服务 ===");
@@ -131,21 +139,27 @@ async function main() {
     ok(r.status === 400, "未提供数量被拒绝");
     r = await call("POST", `/api/batches/${B}/slices`, { count: 0 });
     ok(r.status === 400, "数量为 0 被拒绝");
+    r = await call("POST", `/api/batches/${B}/slices`, { slices: [] });
+    ok(r.status === 400 && r.json.error === "empty_slices", "空切片清单 slices:[] 被拒绝并说明原因", r.json.message);
+    r = await call("POST", `/api/batches/${B}/slices`, { slices: "不是数组" });
+    ok(r.status === 400 && r.json.error === "invalid_slices", "非数组清单被拒绝", r.json.message);
     r = await call("POST", "/api/batches/NO-SUCH/slices", { count: 1 });
     ok(r.status === 404, "不存在的批次返回 404");
 
     /* ---------- 4. 顺序推进：取样 → 切割 ---------- */
     console.log("\n=== 4. 顺序推进，每步校验操作人/依据/时间 ===");
     const S1 = `${B}-S01`;
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, {});
+    r = await advance(B, S1, {});
+    ok(r.status === 400 && r.json.error === "missing_stage", "未指定目标工序不能推进");
+    r = await advance(B, S1, { stage: "取样" });
     ok(r.status === 400 && r.json.error === "missing_field", "缺操作人/依据不能推进");
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, { operator: "陆川", basis: "" });
+    r = await advance(B, S1, { stage: "取样", operator: "陆川", basis: "" });
     ok(r.status === 400, "依据为空不能推进");
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, { operator: "陆川", basis: "取样规程", at: "not-a-time" });
+    r = await advance(B, S1, { stage: "取样", operator: "陆川", basis: "取样规程", at: "not-a-time" });
     ok(r.status === 400 && r.json.error === "invalid_time", "非法时间格式被拒绝", JSON.stringify(r.json));
 
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, {
-      operator: "陆川", basis: "取样作业指导书 v3.2", at: "2026-09-10T09:00",
+    r = await advance(B, S1, {
+      stage: "取样", operator: "陆川", basis: "取样作业指导书 v3.2", at: "2026-09-10T09:00",
     });
     ok(r.status === 200 && r.json.record.stage === "取样", "S01 完成取样", JSON.stringify(r.json?.record));
     ok(r.json.record.operator === "陆川" && r.json.record.basis.includes("v3.2"), "记录含操作人与依据");
@@ -156,13 +170,13 @@ async function main() {
 
     /* ---------- 5. 非法跳步 / 回退 / 重复提交 ---------- */
     console.log("\n=== 5. 非法跳步 / 回退 / 重复提交必须失败 ===");
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, { operator: "x", basis: "y", stage: "观察" });
+    r = await advance(B, S1, { operator: "x", basis: "y", stage: "观察" });
     ok(r.status === 409 && r.json.error === "illegal_transition", "取样后直跳观察 → 409 非法跳步", r.json.message);
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, { operator: "x", basis: "y", stage: "取样" });
+    r = await advance(B, S1, { operator: "x", basis: "y", stage: "取样" });
     ok(r.status === 409 && r.json.error === "duplicate_submit", "重复提交取样 → 409 且不改写", r.json.message);
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, { operator: "x", basis: "y", stage: "研磨" });
+    r = await advance(B, S1, { operator: "x", basis: "y", stage: "研磨" });
     ok(r.status === 409 && r.json.error === "illegal_transition", "跳过切割到研磨 → 409");
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, { operator: "x", basis: "y", stage: "不存在" });
+    r = await advance(B, S1, { operator: "x", basis: "y", stage: "不存在" });
     ok(r.status === 400, "未知工序 → 400");
     {
       const check = await call("GET", `/api/batches/${B}`);
@@ -170,15 +184,73 @@ async function main() {
       ok(s.stage === "取样" && s.records.length === 1, "所有非法请求后状态与记录均未被改写", `stage=${s.stage} records=${s.records.length}`);
     }
 
+    /* ---------- 5b. 并发重复提交：同一切片同时收到相同推进请求 ---------- */
+    console.log("\n=== 5b. 并发重复提交只允许一次推进（独立批次，不干扰主交付流程）===");
+    const cb = await call("POST", "/api/batches", {
+      project: "并发验证批", borehole: "ZK-C", coreBox: "BX-C", depth: "1-2m",
+      registeredBy: "陆川", owner_切割: "高岩", sliceCount: 5,
+    });
+    const CB = cb.json.id;
+    const S5 = `${CB}-S05`;
+    {
+      // 5 个完全相同的“推进到取样”请求同时发出
+      const results = await Promise.all(Array.from({ length: 5 }, () =>
+        advance(CB, S5, { stage: "取样", operator: "陆川", basis: "取样作业指导书 v3.2" })));
+      const codes = results.map((x) => x.status);
+      const n200 = codes.filter((c) => c === 200).length;
+      const n409 = results.filter((x) => x.status === 409 && x.json.error === "duplicate_submit").length;
+      ok(n200 === 1 && n409 === 4, `5 个并发相同请求：恰好 1 个成功、4 个 duplicate_submit（实际 ${codes.join(",")}）`);
+      const s = await sliceState(CB, S5);
+      ok(s.stage === "取样" && s.records.length === 1,
+        "只前进了一步、只写了一条记录", `stage=${s.stage} records=${s.records.length}`);
+      // 落盘后顺序重放同一请求仍应失败且不变
+      const replay = await advance(CB, S5, { stage: "取样", operator: "陆川", basis: "取样作业指导书 v3.2" });
+      ok(replay.status === 409 && replay.json.error === "duplicate_submit", "完成后重放相同请求 → 409", replay.json.message);
+      const s2 = await sliceState(CB, S5);
+      ok(s2.stage === "取样" && s2.records.length === 1, "重放后状态/记录依旧不变");
+    }
+    {
+      // 不同切片的相同目标工序并发，互不影响
+      const S3 = `${CB}-S03`, S4 = `${CB}-S04`;
+      const [a, c] = await Promise.all([
+        advance(CB, S3, { stage: "取样", operator: "陆川", basis: "取样规程" }),
+        advance(CB, S4, { stage: "取样", operator: "陆川", basis: "取样规程" }),
+      ]);
+      ok(a.status === 200 && c.status === 200, "不同切片并发推进各自成功（不会被互相判重）");
+
+      // 同一张切片并发“推进到切割”：仍只允许一次
+      const cuts = await Promise.all([
+        advance(CB, S3, { stage: "切割", operator: "高岩", basis: "切割规程", at: "2026-09-10T13:00" }),
+        advance(CB, S3, { stage: "切割", operator: "高岩", basis: "切割规程", at: "2026-09-10T13:05" }),
+      ]);
+      const okCount = cuts.filter((x) => x.status === 200).length;
+      const dupCount = cuts.filter((x) => x.status === 409 && x.json.error === "duplicate_submit").length;
+      ok(okCount === 1 && dupCount === 1, "同切片同目标并发：一成一拒（后到请求的时间不会覆盖先到记录）");
+      const s3 = await sliceState(CB, S3);
+      ok(s3.stage === "切割" && s3.records.length === 2 && s3.records[1].at === "2026-09-10T13:00:00.000Z",
+        "保留先到请求写入的记录（13:00），未被 13:05 覆盖", JSON.stringify(s3.records.map(r => r.at)));
+    }
+    {
+      // 先到请求校验失败时，不写入、释放槽位；并发的同样请求也都失败，随后合法请求可正常推进
+      const S2 = `${CB}-S02`;
+      const bad = await Promise.all(Array.from({ length: 3 }, () =>
+        advance(CB, S2, { stage: "取样", operator: "", basis: "" })));
+      ok(bad.every((x) => x.status === 400), "3 个并发非法请求全部 400（先到失败不连累后到得到错误语义）");
+      const s = await sliceState(CB, S2);
+      ok(s.stage === null && s.records.length === 0, "全部失败后切片仍在待取样、无任何记录");
+      const good = await advance(CB, S2, { stage: "取样", operator: "陆川", basis: "取样规程" });
+      ok(good.status === 200, "失败释放槽位后，合法请求可以正常推进", good.json?.message || "");
+    }
+
     /* ---------- 6. 正常推进切割/研磨/染色 ---------- */
-    console.log("\n=== 6. 正常推进 切割→研磨→染色（隐式下一步，显式时间）===");
+    console.log("\n=== 6. 正常推进 切割→研磨→染色（显式目标工序与时间）===");
     for (const [stage, operator, basis, hour] of [
       ["切割", "高岩", "切割作业指导书 v3.2", 12],
       ["研磨", "韩砂", "磨片作业指导书 v2.5", 18],
       ["染色", "苏染", "茜素红-S 染色规范 v1.8", 22],
     ]) {
-      const rr = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, {
-        operator, basis, at: `2026-09-10T${hour}:00`,
+      const rr = await advance(B, S1, {
+        stage, operator, basis, at: `2026-09-10T${hour}:00`,
       });
       ok(rr.status === 200 && rr.json.record.stage === stage, `S01 完成「${stage}」`, rr.json?.message || "");
     }
@@ -193,8 +265,8 @@ async function main() {
 
     /* ---------- 7. 观察：空结果拒绝；录入后可完成 ---------- */
     console.log("\n=== 7. 观察结果为空不能完成观察 ===");
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, {
-      operator: "顾鉴", basis: "岩矿鉴定规范", at: "2026-09-11T10:00",
+    r = await advance(B, S1, {
+      stage: "观察", operator: "顾鉴", basis: "岩矿鉴定规范", at: "2026-09-11T10:00",
     });
     ok(r.status === 400 && r.json.error === "observation_required", "空观察结果 → 400 且状态停在染色", r.json.message);
     {
@@ -203,8 +275,8 @@ async function main() {
       ok(s.stage === "染色" && s.records.length === 4 && !s.observation, "被拒后观察记录未生成、观察结果仍为空");
     }
     const OBS = "磁铁石英岩，细粒变晶结构，条带状构造；金属矿物以磁铁矿为主（约 18%），石英呈定向拉长，局部见黄铁矿细脉。";
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, {
-      operator: "顾鉴", basis: "岩矿鉴定规范 DZ/T 0275", at: "2026-09-11T10:20", observation: OBS,
+    r = await advance(B, S1, {
+      stage: "观察", operator: "顾鉴", basis: "岩矿鉴定规范 DZ/T 0275", at: "2026-09-11T10:20", observation: OBS,
     });
     ok(r.status === 200 && r.json.record.stage === "观察", "录入观察结果后完成观察");
     {
@@ -212,7 +284,7 @@ async function main() {
       const s = g.json.slices.find((x) => x.code === S1);
       ok(s.stage === "观察" && s.observation === OBS, "观察结果已保存到切片与记录");
       ok(s.nextStage === null && !s.delivered, "五工序完成，等待批次交付");
-      r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, { operator: "x", basis: "y" });
+      r = await advance(B, S1, { stage: "观察", operator: "x", basis: "y" });
       ok(r.status === 409 && r.json.error === "stage_already_done", "已观察完成再推进/回退 → 409");
     }
 
@@ -231,12 +303,12 @@ async function main() {
         ["取样", "陆川", "取样规程"], ["切割", "高岩", "切割规程"],
         ["研磨", "韩砂", "磨片规程"], ["染色", "苏染", "染色规范"],
       ]) {
-        await call("POST", `/api/batches/${B}/slices/${S2}/advance`,
-          { operator: op, basis: bs, at: `2026-09-11T${String(hour++).padStart(2, "0")}:00` });
+        await advance(B, S2,
+          { stage, operator: op, basis: bs, at: `2026-09-11T${String(hour++).padStart(2, "0")}:00` });
       }
       // 染色→观察时给空白串也必须失败
-      const rr = await call("POST", `/api/batches/${B}/slices/${S2}/advance`,
-        { operator: "顾鉴", basis: "鉴定规范", at: "2026-09-11T17:00", observation: "   " });
+      const rr = await advance(B, S2,
+        { stage: "观察", operator: "顾鉴", basis: "鉴定规范", at: "2026-09-11T17:00", observation: "   " });
       ok(rr.status === 400 && rr.json.error === "observation_required", "纯空白观察结果同样拒绝");
     }
 
@@ -257,14 +329,14 @@ async function main() {
       for (const stage of ["取样", "切割", "研磨", "染色"]) {
         if (STAGES_IDX(s.stage) >= STAGES_IDX(stage)) continue;
         const hh = String(dayHour++).padStart(2, "0");
-        await call("POST", `/api/batches/${B}/slices/${code}/advance`,
-          { operator: plan[stage].op, basis: plan[stage].bs, at: `2026-09-11T${hh}:30` });
+        await advance(B, code,
+          { stage, operator: plan[stage].op, basis: plan[stage].bs, at: `2026-09-11T${hh}:30` });
       }
       g = await call("GET", `/api/batches/${B}`);
       s = g.json.slices.find((x) => x.code === code);
       if (s.stage !== "观察") {
-        await call("POST", `/api/batches/${B}/slices/${code}/advance`, {
-          operator: "顾鉴", basis: "岩矿鉴定规范 DZ/T 0275",
+        await advance(B, code, {
+          stage: "观察", operator: "顾鉴", basis: "岩矿鉴定规范 DZ/T 0275",
           at: "2026-09-11T19:00", observation: `切片 ${code}：粒状结构，矿物组成均匀，未见显著矿化，综合判定为围岩样品。`,
         });
       }
@@ -298,7 +370,7 @@ async function main() {
          g.deliveredAt === originalDelivered.deliveredAt,
         "库里的交付记录完全未被改写");
     }
-    r = await call("POST", `/api/batches/${B}/slices/${S1}/advance`, { operator: "x", basis: "y" });
+    r = await advance(B, S1, { stage: "切割", operator: "x", basis: "y" });
     ok(r.status === 409 && r.json.error === "batch_locked", "已交付批次不能再推进工序");
     r = await call("POST", `/api/batches/${B}/slices`, { count: 1 });
     ok(r.status === 409 && r.json.error === "batch_locked", "已交付批次不能再添加切片");
@@ -314,8 +386,8 @@ async function main() {
     });
     const B2 = r.json.id;
     const T1 = `${B2}-S01`;
-    await call("POST", `/api/batches/${B2}/slices/${T1}/advance`,
-      { operator: "陆川", basis: "规程", at: "2026-09-10T08:00" }); // 取样：24h 时限，已超约 24h
+    await advance(B2, T1,
+      { stage: "取样", operator: "陆川", basis: "规程", at: "2026-09-10T08:00" }); // 取样：24h 时限，已超约 24h
     {
       const g = await call("GET", `/api/batches/${B2}`);
       const s = g.json.slices[0];
@@ -324,8 +396,9 @@ async function main() {
       const listed = g.json.overdueItems.find((i) => i.code === T1);
       ok(!!listed, "工作台批次级逾期清单包含该切片");
     }
-    r = await call("POST", `/api/batches/${B2}/slices/${T1}/advance`,
-      { operator: "高岩", basis: "切割规程", at: "2026-09-12T07:00" }); // 切割刚进入，未逾期
+    r = await advance(B2, T1,
+      { stage: "切割", operator: "高岩", basis: "切割规程", at: "2026-09-12T07:00" }); // 切割刚进入，未逾期
+    ok(r.status === 200, "切割推进成功");
     {
       const g = await call("GET", `/api/batches/${B2}`);
       const s = g.json.slices[0];

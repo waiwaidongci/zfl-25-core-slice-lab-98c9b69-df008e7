@@ -260,10 +260,17 @@ function registerBatch(db, input) {
 
 function addSlices(batch, input) {
   if (batch.delivered) throw new HttpError(409, "batch_locked", "批次已交付封存，不能再添加切片");
-  const specs = Array.isArray(input.slices) ? input.slices : null;
+  const hasList = input.slices !== undefined && input.slices !== null;
+  if (hasList && !Array.isArray(input.slices)) {
+    throw new HttpError(400, "invalid_slices", "切片清单必须是数组，每项可含 method 字段");
+  }
+  const specs = hasList ? input.slices : null;
+  if (specs && specs.length === 0) {
+    throw new HttpError(400, "empty_slices", "切片清单为空：至少需要添加 1 张切片（请提供非空 slices 清单，或改用 count 指定数量）");
+  }
   const count = specs ? specs.length : Number(input.count) || 0;
   if (!specs && (!Number.isInteger(count) || count <= 0)) {
-    throw new HttpError(400, "missing_count", "请提供要添加的切片数量或切片清单");
+    throw new HttpError(400, "missing_count", "请提供要添加的切片数量（count，正整数）或非空切片清单（slices）");
   }
   if (count > 50) throw new HttpError(400, "too_many_slices", "单次最多添加 50 张切片");
   const start = batch.slices.length;
@@ -287,7 +294,7 @@ function addSlices(batch, input) {
   return batch;
 }
 
-function advanceSlice(batch, slice, input) {
+function advanceSlice(batch, slice, input, targetStage) {
   if (batch.delivered) throw new HttpError(409, "batch_locked", "批次已交付封存，记录不可改写");
   if (slice.delivered) throw new HttpError(409, "slice_locked", "该切片已交付，不能再推进");
 
@@ -300,21 +307,19 @@ function advanceSlice(batch, slice, input) {
     throw new HttpError(409, "stage_already_done", `切片已停留在“${slice.stage}”，下一步应交付，不能继续推进或回退`);
   }
 
-  // 显式给出目标阶段时严格校验，非法跳步/回退直接失败
-  if (input.stage !== undefined && input.stage !== null && String(input.stage).trim() !== "") {
-    const target = String(input.stage).trim();
-    if (!STAGES.includes(target)) throw new HttpError(400, "unknown_stage", `未知工序：${target}`);
-    if (target === slice.stage) {
-      throw new HttpError(409, "duplicate_submit", `该切片已完成“${target}”，重复提交不会改写原记录`);
-    }
-    if (target !== expected) {
-      const where = slice.stage === null ? "尚未取样" : `当前停留在“${slice.stage}”`;
-      throw new HttpError(
-        409,
-        "illegal_transition",
-        `非法跳步/回退：切片${where}，只能推进到“${expected}”，不能直接到“${target}”`
-      );
-    }
+  // 目标工序由调用方（路由）结合请求意图解析；严格校验，非法跳步/回退直接失败
+  const target = targetStage || expected;
+  if (!STAGES.includes(target)) throw new HttpError(400, "unknown_stage", `未知工序：${target}`);
+  if (target === slice.stage) {
+    throw new HttpError(409, "duplicate_submit", `该切片已完成“${target}”，重复提交不会改写原记录（状态与记录保持不变）`);
+  }
+  if (target !== expected) {
+    const where = slice.stage === null ? "尚未取样" : `当前停留在“${slice.stage}”`;
+    throw new HttpError(
+      409,
+      "illegal_transition",
+      `非法跳步/回退：切片${where}，只能推进到“${expected}”，不能直接到“${target}”`
+    );
   }
 
   const record = { stage: expected, operator, at, basis, observation: null };
@@ -482,9 +487,65 @@ function batchView(batch, refNow) {
 let chain = Promise.resolve();
 function withDb(fn) {
   const run = chain.then(() => loadDb().then(fn));
-  // 无论成败都继续解锁
   chain = run.then(() => {}, () => {});
   return run;
+}
+function normalizeTargetStage(input) {
+  const raw = input.stage ?? input.target;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return null;
+  return String(raw).trim();
+}
+
+/* ---------- 推进防重（同一切片 → 同一目标工序的并发去重） ----------
+ *
+ * 背景：串行写锁（withDb）只保证不互相覆盖。两个相同的推进请求并发时，
+ * 第一个把 取样→切割 落盘后，第二个重新加载到新状态，会被当成“推进到研磨”
+ * 再成功一次 —— 于是连续前进两步、多写一条记录。
+ *
+ * 顺序重发没有这个问题：状态机会发现目标工序已完成并拒绝；唯一漏洞是后到
+ * 请求在首个请求落盘前读到了旧状态。这里加“进行中槽位”：同一
+ * （切片, 目标工序）只允许一个请求执行，其余并发请求等首个结果——
+ *   - 首个成功：后到的一律 409 duplicate_submit，不写任何记录；
+ *   - 首个失败（如缺依据/空观察）：后到请求作为独立尝试再执行一次，
+ *     不会因为别人的校验失败被误伤。
+ * 槽位声明在同一事件循环轮次内同步完成，Node 单线程下天然原子。
+ */
+const inflightAdvance = new Map(); // `${batchId}|${sliceCode}|${target}` -> Promise<settled>
+
+function runAdvance({ batchId, sliceCode, target, input }) {
+  const key = `${batchId}|${sliceCode}|${target}`;
+  const execute = () =>
+    withDb(async (db) => {
+      const b = findBatch(db, batchId);
+      const s = findSlice(b, sliceCode);
+      const r = advanceSlice(b, s, input, target);
+      await saveDb(db);
+      return r;
+    });
+  const asSettled = (p) => p.then((r) => ({ ok: true, r }), (e) => ({ ok: false, e }));
+  const dupError = () => new HttpError(
+    409,
+    "duplicate_submit",
+    `检测到并发重复提交：该切片的“${target}”推进已由先到请求完成，后到请求未写入任何记录，切片仅前进一步`
+  );
+
+  function attempt() {
+    const existing = inflightAdvance.get(key);
+    if (existing) {
+      return existing.then((first) => {
+        if (first.ok) throw dupError();
+        return attempt(); // 首个失败（校验未过），本请求独立重试一次
+      });
+    }
+    const settled = asSettled(execute());
+    inflightAdvance.set(key, settled);
+    settled.finally(() => inflightAdvance.delete(key));
+    return settled.then((out) => {
+      if (!out.ok) throw out.e;
+      return out.r;
+    });
+  }
+  return attempt();
 }
 
 /* ---------- 前端页面 ---------- */
@@ -554,17 +615,18 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 201, batchView(batch, Date.now()));
     }
 
-    // 推进到下一工序
+    // 推进到下一工序（必须显式说明目标工序，便于服务端识别并发重复提交）
     m = p.match(/^\/api\/batches\/([^/]+)\/slices\/([^/]+)\/advance$/);
     if (m && req.method === "POST") {
       const input = await readBody(req);
-      const result = await withDb(async (db) => {
-        const b = findBatch(db, m[1]);
-        const s = findSlice(b, decodeURIComponent(m[2]));
-        const r = advanceSlice(b, s, input);
-        await saveDb(db);
-        return r;
-      });
+      const batchId = m[1];
+      const sliceCode = decodeURIComponent(m[2]);
+      const target = normalizeTargetStage(input);
+      if (!target) {
+        throw new HttpError(400, "missing_stage", "推进请求必须指定目标工序（字段 stage），请由“推进到下一工序”按钮提交");
+      }
+      if (!STAGES.includes(target)) throw new HttpError(400, "unknown_stage", `未知工序：${target}`);
+      const result = await runAdvance({ batchId, sliceCode, target, input });
       return sendJson(res, 200, { batch: batchView(result.batch, Date.now()), record: result.record });
     }
 

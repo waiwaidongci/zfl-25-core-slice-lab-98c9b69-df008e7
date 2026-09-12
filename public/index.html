@@ -216,7 +216,7 @@ function renderSlice(batch, s) {
         </div>
         <div><label>依据（作业指导书 / 标准 / 任务单）*</label><input data-f="basis" placeholder="如：制片作业指导书 v3.2 / 任务单 ZK17-09"></div>
         ${needObs ? `<div><label>观察结果 *（为空不能完成观察，也不能交付）</label><textarea data-f="observation" placeholder="矿物组成、结构构造、矿化特征……"></textarea></div>` : ""}
-        <div><button class="small" data-act="advance" data-batch="${esc(batch.id)}" data-slice="${esc(s.code)}">推进到「${esc(s.nextStage)}」</button></div>
+        <div><button class="small" data-act="advance" data-batch="${esc(batch.id)}" data-slice="${esc(s.code)}" data-target="${esc(s.nextStage)}">推进到「${esc(s.nextStage)}」</button></div>
       </div>`;
   }
   let obsEdit = "";
@@ -334,6 +334,7 @@ function bindActions() {
         }
         if (act === "advance") {
           const body = {
+            stage: btn.dataset.target,           // 目标工序：服务端据此识别并发重复提交
             operator: readField(card, "operator"),
             basis: readField(card, "basis"),
             at: readField(card, "at") || undefined,
@@ -341,9 +342,12 @@ function bindActions() {
           const obs = readField(card, "observation");
           if (obs) body.observation = obs;
           remember(body.operator || null);
-          const r = await api(`/api/batches/${encodeURIComponent(batchId)}/slices/${encodeURIComponent(sliceCode)}/advance`,
-            { method: "POST", body });
-          toast(`${sliceCode} 已推进到「${r.record.stage}」`, "ok");
+          btn.disabled = true;                   // 请求期间禁用，防止双击
+          try {
+            const r = await api(`/api/batches/${encodeURIComponent(batchId)}/slices/${encodeURIComponent(sliceCode)}/advance`,
+              { method: "POST", body });
+            toast(`${sliceCode} 已推进到「${r.record.stage}」`, "ok");
+          } finally { btn.disabled = false; }
         }
         if (act === "obs") {
           const body = { observation: readField(card, "observation2"), operator: readField(card, "operator2") };
